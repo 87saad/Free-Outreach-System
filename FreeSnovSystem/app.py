@@ -3,13 +3,13 @@ import streamlit.components.v1 as components
 import pandas as pd
 import sqlite3
 import datetime
+from campaign_tracker_tab import render_campaign_tracker_tab, ensure_tracker_schema
 
 # ==========================================
 # 1. PAGE CONFIGURATION & LIGHT THEME CSS
 # ==========================================
 st.set_page_config(
     page_title="Free Snov.io - Advanced Outreach Engine",
-    page_icon="💜",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -236,6 +236,7 @@ menu = st.sidebar.radio("Navigation Menu", [
     "Persistent Templates (Drag & Drop)",
     "Campaign Launcher & Senders",
     "Campaign History & Dataset",
+    "Campaign Tracker (Stage & Replies)",
     "Email Warm-up Manager"
 ])
 
@@ -415,7 +416,7 @@ elif menu == "Persistent Templates (Drag & Drop)":
 # ==========================================
 elif menu == "Campaign Launcher & Senders":
     st.title("🚀 Campaign Launcher & Sender Accounts")
-    st.markdown("Yahan se aap apne saved templates ke sath campaign launch kar sakte hain. Har campaign ka record **Campaign History** mein save hoga.")
+    st.markdown("Yahan se aap apne saved templates ke sath campaign launch kar sakte hain. Har campaign ka record **Campaign History** aur **Campaign Tracker** mein save hoga.")
 
     with st.expander("➕ Add New Sender Gmail Account", expanded=False):
         with st.form("add_sender_form"):
@@ -473,14 +474,21 @@ elif menu == "Campaign Launcher & Senders":
                     VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, 'Completed')
                 ''', (camp_name, day_name, date_str, time_str, ", ".join(selected_senders), pending_count, pending_count))
 
+                ensure_tracker_schema(conn)
+                pending_rows = conn.execute("SELECT url, email, first_name FROM leads WHERE status = 'Pending'").fetchall()
+                for p_url, p_email, p_fn in pending_rows:
+                    conn.execute('''
+                        INSERT INTO campaign_tracking (campaign_name, lead_email, lead_url, first_name, sent_status, stage_status, reply_status)
+                        VALUES (?, ?, ?, ?, 'Sent', 'Initial Sent', 'No Reply')
+                    ''', (camp_name.strip(), p_email, p_url, p_fn))
+
                 cursor.execute("UPDATE leads SET status = 'Sent' WHERE status = 'Pending'")
                 conn.commit()
                 conn.close()
 
-                st.success(f"✅ Campaign '{camp_name}' ({day_name}) kamyabi se chal gayi hai! {pending_count} leads ko emails dispatch kar di gayi hain aur record History Dataset mein save ho gaya hai.")
+                st.success(f"✅ Campaign '{camp_name}' ({day_name}) kamyabi se chal gayi hai! {pending_count} leads ko emails dispatch kar di gayi hain aur record History Dataset aur Campaign Tracker dono mein save ho gaya hai.")
     else:
         st.info("Upar diye gaye 'Add New Sender Gmail Account' section se pehle apna sender account add karein.")
-
 # ==========================================
 # 8. PAGE 5: CAMPAIGN HISTORY & ANALYTICS DATASET
 # ==========================================
@@ -515,6 +523,15 @@ elif menu == "Campaign History & Dataset":
 
 # ==========================================
 # 9. PAGE 6: EMAIL WARM-UP MANAGER
+# ==========================================
+# ==========================================
+# PAGE: CAMPAIGN TRACKER (STAGE & REPLIES)
+# ==========================================
+elif menu == "Campaign Tracker (Stage & Replies)":
+    render_campaign_tracker_tab(DB_NAME)
+
+# ==========================================
+# PAGE 6: EMAIL WARM-UP MANAGER
 # ==========================================
 elif menu == "Email Warm-up Manager":
     st.title("🔥 Automated Email Warm-up Pool")
