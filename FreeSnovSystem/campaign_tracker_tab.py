@@ -1,4 +1,3 @@
-import os
 import sqlite3
 import pandas as pd
 import streamlit as st
@@ -16,6 +15,7 @@ def ensure_tracker_schema(conn: sqlite3.Connection) -> None:
     """
     Ensures required columns/tables exist safely without breaking existing schemas.
     """
+    conn.row_factory = sqlite3.Row
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS campaign_tracking (
@@ -32,7 +32,6 @@ def ensure_tracker_schema(conn: sqlite3.Connection) -> None:
         """
     )
 
-    # If an existing leads/outreach table is used, safely add columns if missing
     existing_tables = {
         row["name"]
         for row in conn.execute(
@@ -87,6 +86,7 @@ def fetch_campaign_records(conn: sqlite3.Connection, campaign_query: str) -> pd.
     Loads campaign records from `campaign_tracking` first, and falls back to `leads`
     if `campaign_tracking` has no rows for the entered campaign name.
     """
+    conn.row_factory = sqlite3.Row
     clean_name = (campaign_query or "").strip()
     if not clean_name:
         return pd.DataFrame()
@@ -196,7 +196,6 @@ def render_campaign_tracker_tab(db_path: str = DEFAULT_DB_PATH) -> None:
             key="tracker_campaign_name_input",
         )
 
-        # Optional quick status update helper so you can log replies, follow-ups, or bounces easily
         with st.expander("Update / Log Lead Stage, Reply or Bounce (Optional)", expanded=False):
             with st.form("tracker_update_form", clear_on_submit=True):
                 f_camp = st.text_input(
@@ -279,7 +278,6 @@ def render_campaign_tracker_tab(db_path: str = DEFAULT_DB_PATH) -> None:
             st.warning(f"'{campaign_input.strip()}' ke liye abhi koi record nahi mila.")
             return
 
-        # Summary metrics
         total_sent = int((df["Send Status"] == "Sent").sum())
         total_replies = int((df["Reply Status"] == "Reply Received").sum())
         total_bounced = int((df["Stage / Bounce Status"] == "Bounced").sum())
@@ -293,7 +291,6 @@ def render_campaign_tracker_tab(db_path: str = DEFAULT_DB_PATH) -> None:
         m3.metric("Replies Received", total_replies)
         m4.metric("Bounced", total_bounced)
 
-        # Filters
         filter_col1, filter_col2 = st.columns(2)
         with filter_col1:
             stage_filter = st.multiselect(
