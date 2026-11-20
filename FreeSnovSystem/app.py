@@ -1,13 +1,16 @@
+import datetime
+import smtplib
+import sqlite3
+import time
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+
+import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
-import pandas as pd
-import sqlite3
-import datetime
-from campaign_tracker_tab import render_campaign_tracker_tab, ensure_tracker_schema
-import smtplib
-import time
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
+
+from campaign_tracker_tab import ensure_tracker_schema, render_campaign_tracker_tab
+from warmup_engine import render_warmup_manager_page
 
 # ==========================================
 # 1. PAGE CONFIGURATION & LIGHT THEME CSS
@@ -110,8 +113,10 @@ st.markdown("""
 # ==========================================
 DB_NAME = "outreach_pro_v3.db"
 
+
 def get_connection():
-    return sqlite3.connect(DB_NAME)
+    return sqlite3.connect(DB_NAME, check_same_thread=False)
+
 
 def init_db():
     conn = get_connection()
@@ -183,7 +188,9 @@ def init_db():
     conn.commit()
     conn.close()
 
+
 init_db()
+
 
 def load_template(step_key):
     conn = get_connection()
@@ -192,6 +199,7 @@ def load_template(step_key):
     row = cursor.fetchone()
     conn.close()
     return row if row else ("", "", "")
+
 
 def save_template(step_key, subject, body):
     conn = get_connection()
@@ -204,6 +212,7 @@ def save_template(step_key, subject, body):
     ''', (subject, body, now_str, step_key))
     conn.commit()
     conn.close()
+
 
 def render_draggable_chips():
     html_code = (
@@ -228,6 +237,7 @@ def render_draggable_chips():
         '</div>'
     )
     components.html(html_code, height=95)
+
 
 # ==========================================
 # 3. SIDEBAR NAVIGATION
@@ -577,6 +587,7 @@ elif menu == "Campaign Launcher & Senders":
                     )
     else:
         st.info("Upar diye gaye 'Add New Sender Gmail Account' section se pehle apna sender account add karein.")
+
 # ==========================================
 # 8. PAGE 5: CAMPAIGN HISTORY & ANALYTICS DATASET
 # ==========================================
@@ -610,41 +621,13 @@ elif menu == "Campaign History & Dataset":
         st.info("Abhi tak koi campaign run nahi ki gayi. Jab aap 'Campaign Launcher' se campaign chalayenge, toh uska din-ba-din record yahan khud ba khud banta jayega.")
 
 # ==========================================
-# 9. PAGE 6: EMAIL WARM-UP MANAGER
-# ==========================================
-# ==========================================
 # PAGE: CAMPAIGN TRACKER (STAGE & REPLIES)
 # ==========================================
 elif menu == "Campaign Tracker (Stage & Replies)":
     render_campaign_tracker_tab(DB_NAME)
 
 # ==========================================
-# PAGE 6: EMAIL WARM-UP MANAGER
+# 9. PAGE 6: EMAIL WARM-UP MANAGER
 # ==========================================
 elif menu == "Email Warm-up Manager":
-    st.title("🔥 Automated Email Warm-up Pool")
-    st.markdown("Apne multiple warm-up accounts yahan add karein taake aap ke accounts ki reputation strong rahe.")
-
-    with st.form("warmup_add_form"):
-        w_email = st.text_input("Warm-up Gmail Address")
-        w_pass = st.text_input("16-Digit App Password", type="password")
-        if st.form_submit_button("➕ Add to Warm-up Pool"):
-            if w_email and w_pass:
-                conn = get_connection()
-                cursor = conn.cursor()
-                cursor.execute("INSERT OR IGNORE INTO warmup_accounts (email, app_password) VALUES (?, ?)", (w_email.strip(), w_pass.strip()))
-                conn.commit()
-                conn.close()
-                st.success(f"Account '{w_email}' warm-up pool mein shamil ho gaya!")
-                st.rerun()
-            else:
-                st.error("Email aur App Password dono darj karein.")
-
-    st.divider()
-    conn = get_connection()
-    df_w = pd.read_sql("SELECT id, email FROM warmup_accounts", conn)
-    conn.close()
-    if not df_w.empty:
-        st.dataframe(df_w, use_container_width=True)
-    else:
-        st.info("Abhi tak koi warm-up account add nahi kiya gaya.")
+    render_warmup_manager_page(DB_NAME)
