@@ -4,6 +4,10 @@ import pandas as pd
 import sqlite3
 import datetime
 from campaign_tracker_tab import render_campaign_tracker_tab, ensure_tracker_schema
+import smtplib
+import time
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 # ==========================================
 # 1. PAGE CONFIGURATION & LIGHT THEME CSS
@@ -416,7 +420,7 @@ elif menu == "Persistent Templates (Drag & Drop)":
 # ==========================================
 elif menu == "Campaign Launcher & Senders":
     st.title("🚀 Campaign Launcher & Sender Accounts")
-    st.markdown("Yahan se aap apne saved templates ke sath campaign launch kar sakte hain. Har campaign ka record **Campaign History** aur **Campaign Tracker** mein save hoga.")
+    st.markdown("Yahan se aap apne saved templates aur Gmail App Passwords ke zariye **real emails** dispatch kar sakte hain.")
 
     with st.expander("➕ Add New Sender Gmail Account", expanded=False):
         with st.form("add_sender_form"):
@@ -426,7 +430,10 @@ elif menu == "Campaign Launcher & Senders":
                 if s_email and s_pass:
                     conn = get_connection()
                     cursor = conn.cursor()
-                    cursor.execute("INSERT OR IGNORE INTO sender_accounts (email, app_password) VALUES (?, ?)", (s_email.strip(), s_pass.strip()))
+                    cursor.execute(
+                        "INSERT OR IGNORE INTO sender_accounts (email, app_password) VALUES (?, ?)",
+                        (s_email.strip(), s_pass.replace(" ", "").strip())
+                    )
                     conn.commit()
                     conn.close()
                     st.success(f"Account '{s_email}' save ho gaya!")
@@ -436,11 +443,14 @@ elif menu == "Campaign Launcher & Senders":
 
     st.divider()
 
-    st.subheader("🎯 Configure & Run Campaign")
-    camp_name = st.text_input("Campaign Name (e.g., SaaS Outreach Monday Batch)", value=f"Outreach_{datetime.datetime.now().strftime('%d_%b')}")
+    st.subheader("🎯 Configure & Run Real Email Campaign")
+    camp_name = st.text_input(
+        "Campaign Name (e.g., SaaS Outreach Monday Batch)",
+        value=f"Outreach_{datetime.datetime.now().strftime('%d_%b')}"
+    )
 
     conn = get_connection()
-    df_senders = pd.read_sql("SELECT id, email FROM sender_accounts", conn)
+    df_senders = pd.read_sql("SELECT id, email, app_password FROM sender_accounts", conn)
     pending_count = pd.read_sql("SELECT COUNT(*) as c FROM leads WHERE status='Pending'", conn)['c'][0]
     conn.close()
 
@@ -450,10 +460,15 @@ elif menu == "Campaign Launcher & Senders":
         cols = st.columns(2)
         for idx, row in df_senders.iterrows():
             if cols[idx % 2].checkbox(f"📧 {row['email']}", value=True, key=f"chk_s_{row['id']}"):
-                selected_senders.append(row['email'])
+                selected_senders.append((row['email'], row['app_password']))
 
-        followup_days = st.slider("Follow-up Gap (Days)", 1, 10, 3)
-        st.info(f"📊 **Ready to Send:** Database mein is waqt **{pending_count} Pending Leads** mojood hain aur aap ke saved **Persistent Templates** use honge.")
+        c_set1, c_set2 = st.columns(2)
+        with c_set1:
+            followup_days = st.slider("Follow-up Gap (Days)", 1, 10, 3)
+        with c_set2:
+            delay_seconds = st.slider("Delay Between Emails (Seconds - Spam Safety)", 2, 30, 5)
+
+        st.info(f"📊 **Ready to Dispatch:** Database mein **{pending_count} Pending Leads** hain aur aap ka saved **Initial Template** real Gmail SMTP se send hoga.")
 
         if st.button("🚀 Launch Campaign Now"):
             if not selected_senders:
@@ -461,32 +476,105 @@ elif menu == "Campaign Launcher & Senders":
             elif pending_count == 0:
                 st.warning("⚠️ Database mein koi Pending Lead mojood nahi hai. Pehle Excel file upload karein.")
             else:
-                now = datetime.datetime.now()
-                day_name = now.strftime("%A")
-                date_str = now.strftime("%Y-%m-%d")
-                time_str = now.strftime("%I:%M %p")
+                init_sub, init_body, _ = load_template("Initial")
+                if not init_sub.strip() or not init_body.strip():
+                    st.error("❌ Pehle 'Persistent Templates' mein ja kar Initial Subject aur Body save karein.")
+                else:
+                    conn = get_connection()
+                    ensure_tracker_schema(conn)
+                    pending_rows = conn.execute(
+                        "SELECT id, url, email, first_name FROM leads WHERE status = 'Pending'"
+                    ).fetchall()
 
-                conn = get_connection()
-                cursor = conn.cursor()
-                cursor.execute('''
-                    INSERT INTO campaign_logs
-                    (campaign_name, day_of_week, run_date, run_time, senders_used, leads_targeted, sent_count, reply_count, bounce_count, status)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, 'Completed')
-                ''', (camp_name, day_name, date_str, time_str, ", ".join(selected_senders), pending_count, pending_count))
+                    progress_bar = st.progress(0)
+                    status_box = st.empty()
 
-                ensure_tracker_schema(conn)
-                pending_rows = conn.execute("SELECT url, email, first_name FROM leads WHERE status = 'Pending'").fetchall()
-                for p_url, p_email, p_fn in pending_rows:
-                    conn.execute('''
-                        INSERT INTO campaign_tracking (campaign_name, lead_email, lead_url, first_name, sent_status, stage_status, reply_status)
-                        VALUES (?, ?, ?, ?, 'Sent', 'Initial Sent', 'No Reply')
-                    ''', (camp_name.strip(), p_email, p_url, p_fn))
+                    sent_success = 0
+                    bounce_failed = 0
+                    total_leads_to_send = len(pending_rows)
 
-                cursor.execute("UPDATE leads SET status = 'Sent' WHERE status = 'Pending'")
-                conn.commit()
-                conn.close()
+                    for idx, (lead_id, p_url, p_email, p_fn) in enumerate(pending_rows):
+                        sender_email, sender_pass = selected_senders[idx % len(selected_senders)]
 
-                st.success(f"✅ Campaign '{camp_name}' ({day_name}) kamyabi se chal gayi hai! {pending_count} leads ko emails dispatch kar di gayi hain aur record History Dataset aur Campaign Tracker dono mein save ho gaya hai.")
+                        safe_fn = (p_fn or "").strip() or "there"
+                        safe_url = (p_url or "").strip()
+                        safe_email = (p_email or "").strip()
+
+                        final_sub = (
+                            init_sub.replace("{First_Name}", safe_fn)
+                            .replace("{URL}", safe_url)
+                            .replace("{Email}", safe_email)
+                        )
+                        final_body = (
+                            init_body.replace("{First_Name}", safe_fn)
+                            .replace("{URL}", safe_url)
+                            .replace("{Email}", safe_email)
+                        )
+
+                        status_box.info(f"📤 Sending ({idx + 1}/{total_leads_to_send}): **{safe_email}** via `{sender_email}`...")
+
+                        try:
+                            msg = MIMEMultipart()
+                            msg["From"] = sender_email
+                            msg["To"] = safe_email
+                            msg["Subject"] = final_sub
+                            msg.attach(MIMEText(final_body, "plain", "utf-8"))
+
+                            with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=20) as server:
+                                server.login(sender_email, sender_pass.replace(" ", ""))
+                                server.sendmail(sender_email, safe_email, msg.as_string())
+
+                            sent_success += 1
+                            conn.execute("UPDATE leads SET status = 'Sent' WHERE id = ?", (lead_id,))
+                            conn.execute(
+                                '''
+                                INSERT INTO campaign_tracking
+                                (campaign_name, lead_email, lead_url, first_name, sent_status, stage_status, reply_status)
+                                VALUES (?, ?, ?, ?, 'Sent', 'Initial Sent', 'No Reply')
+                                ''',
+                                (camp_name.strip(), safe_email, safe_url, safe_fn)
+                            )
+                        except Exception as send_err:
+                            bounce_failed += 1
+                            conn.execute("UPDATE leads SET status = 'Failed' WHERE id = ?", (lead_id,))
+                            conn.execute(
+                                '''
+                                INSERT INTO campaign_tracking
+                                (campaign_name, lead_email, lead_url, first_name, sent_status, stage_status, reply_status)
+                                VALUES (?, ?, ?, ?, 'Bounced', 'Bounced', 'Bounced (No Reply)')
+                                ''',
+                                (camp_name.strip(), safe_email, safe_url, safe_fn)
+                            )
+                            st.warning(f"⚠️ `{safe_email}` par send fail hua ({sender_email}): {send_err}")
+
+                        conn.commit()
+                        progress_bar.progress((idx + 1) / total_leads_to_send)
+
+                        if idx < total_leads_to_send - 1:
+                            time.sleep(delay_seconds)
+
+                    now = datetime.datetime.now()
+                    day_name = now.strftime("%A")
+                    date_str = now.strftime("%Y-%m-%d")
+                    time_str = now.strftime("%I:%M %p")
+                    used_emails_str = ", ".join([s[0] for s in selected_senders])
+
+                    conn.execute(
+                        '''
+                        INSERT INTO campaign_logs
+                        (campaign_name, day_of_week, run_date, run_time, senders_used, leads_targeted, sent_count, reply_count, bounce_count, status)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, 'Completed')
+                        ''',
+                        (camp_name.strip(), day_name, date_str, time_str, used_emails_str, total_leads_to_send, sent_success, bounce_failed)
+                    )
+                    conn.commit()
+                    conn.close()
+
+                    status_box.empty()
+                    st.success(
+                        f"✅ Campaign '{camp_name}' mukammal! **{sent_success}** real emails send ho gayin aur **{bounce_failed}** bounce/fail huin. "
+                        f"Aap apne Gmail ke **Sent** folder aur **Campaign Tracker** mein verify kar sakte hain!"
+                    )
     else:
         st.info("Upar diye gaye 'Add New Sender Gmail Account' section se pehle apna sender account add karein.")
 # ==========================================
